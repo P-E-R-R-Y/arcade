@@ -366,13 +366,17 @@ class ArcadeCore : public IApp {
             if (libs.empty())
                 return say("(aucune)");
             for (const Entry &lib : libs) {
-                std::printf("  %c %s\n",
-                            (_using && keyOf(_using) == lib.key) ? '*' : ' ',
-                            lib.key.c_str());
+                const unsigned held = holders(LIBS, lib);
+
+                std::printf("  %c %-14s %s\n", held ? '*' : ' ', lib.key.c_str(),
+                            held ? ("tenue x" + std::to_string(held)).c_str() : "libre");
                 for (IModule *module : _modules.GetAllByKey(lib.key))
                     if (module)
-                        std::printf("      %-12s (%s)\n",
-                                    module->name(), module->type());
+                        std::printf("      %-12s (%-9s) %s\n",
+                                    module->name(), module->type(),
+                                    module->uses()
+                                        ? ("tenu x" + std::to_string(module->uses())).c_str()
+                                        : "");
             }
             std::fflush(stdout);
         }
@@ -388,13 +392,12 @@ class ArcadeCore : public IApp {
                  * tenir la fenetre sans tenir le son, et les deux modules
                  * portent le meme nom. Les marquer ensemble ferait passer
                  * sdl2 pour le vendor audio en service. */
-                const bool live = type.empty()
-                    ? ((_using && entry.name == _using->name())
-                       || (_running && entry.name == _running->name()))
-                    : (inService && entry.name == inService->name());
+                IModule *module = _modules.Get(entry.type, entry.key);
+                const unsigned held = module ? module->uses() : 0;
 
-                std::printf("  %c %-10s [%s]\n", live ? '*' : ' ',
-                            entry.name.c_str(), entry.key.c_str());
+                std::printf("  %c %-10s (%-9s) [%s] %s\n", held ? '*' : ' ',
+                            entry.name.c_str(), entry.type.c_str(), entry.key.c_str(),
+                            held ? ("tenu x" + std::to_string(held)).c_str() : "");
             }
             std::fflush(stdout);
         }
@@ -865,7 +868,7 @@ class ArcadeCore : public IApp {
                     text += "   (aucun)\n";
                 for (size_t i = 0; i < list.size(); i++)
                     text += line(here && i == _cursors[all[c]],
-                                 live(all[c], list[i]), list[i]);
+                                 holders(all[c], list[i]), list[i]);
 
                 _body->setFont(_font);
                 _body->setFontSize(18);
@@ -895,20 +898,41 @@ class ArcadeCore : public IApp {
         }
 
         /** @brief Cette entree est-elle celle en service pour son contrat ? */
+        /**
+         * @brief Ce module est-il TENU par quelqu'un ?
+         *
+         * uses() > 0, pas le choix affiche par la borne : un jeu prend ce
+         * qu'il veut sans le lui demander, et c'est cette detention-la qui
+         * empeche une bibliotheque de se fermer.
+         */
         bool live(const std::string &type, const Entry &entry) {
-            if (type == IAppModule::contract)
-                return _running && _running->name() == entry.name;
+            /* Une bibliotheque est tenue des qu'un seul de ses modules l'est. */
+            if (type == LIBS) {
+                for (IModule *module : _modules.GetAllByKey(entry.key))
+                    if (module && module->uses())
+                        return true;
+                return false;
+            }
 
-            /* Une bibliotheque est marquee quand c'est d'elle que vient la
-             * fenetre : c'est le seul lien que la borne ait avec une dll. */
-            if (type == LIBS)
-                return _using && keyOf(_using) == entry.key;
+            IModule *module = _modules.Get(entry.type, entry.key);
 
-            /* Colonne fusionnee : chaque entree repond de SON contrat, pas
-             * de celui de la colonne, qui n'en est pas un. */
-            IModule *inService = current(type == OTHERS ? entry.type : type);
+            return module && module->uses();
+        }
 
-            return inService && inService->name() == entry.name;
+        /** @brief Combien de detenteurs, pour l'affichage. */
+        unsigned holders(const std::string &type, const Entry &entry) {
+            unsigned count = 0;
+
+            if (type == LIBS) {
+                for (IModule *module : _modules.GetAllByKey(entry.key))
+                    if (module)
+                        count += module->uses();
+                return count;
+            }
+
+            IModule *module = _modules.Get(entry.type, entry.key);
+
+            return module ? module->uses() : 0;
         }
 
         /** @brief La bibliotheque d'ou vient ce module, "" si introuvable. */
@@ -926,9 +950,10 @@ class ArcadeCore : public IApp {
          * es, l'etoile dit qui a fabrique la fenetre que tu regardes. Ils se
          * separent des qu'on charge ou decharge.
          */
-        static std::string line(bool selected, bool active, const Entry &entry) {
+        static std::string line(bool selected, unsigned holders, const Entry &entry) {
             return std::string(selected ? " > " : "   ") + entry.name +
-                   "   (" + entry.type + ")" + (active ? "  *en service" : "") + "\n";
+                   "   (" + entry.type + ")" +
+                   (holders ? "  *tenu x" + std::to_string(holders) : "") + "\n";
         }
 
         /** @brief Une ligne de la table, mise en forme pour l'affichage. */
