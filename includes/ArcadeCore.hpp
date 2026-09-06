@@ -48,6 +48,11 @@ class ArcadeCore : public IApp {
         static constexpr const char *GRAPHIC3 = IGraphic3Module::contract;
         static constexpr const char *GAME     = IAppModule::contract;
 
+        /* Deux colonnes qui ne sont pas des contrats : les bibliotheques
+         * chargees, et tous les autres contrats regroupes. */
+        static constexpr const char *LIBS   = "librairies";
+        static constexpr const char *OTHERS = "autres";
+
         /**
          * @brief Ouvre toutes les bibliotheques du dossier, puis la fenetre.
          *
@@ -98,6 +103,20 @@ class ArcadeCore : public IApp {
                 for (IModule *module : _modules.GetAllByType(type))
                     if (module)   // un Span rend les trous a nullptr
                         found.push_back(static_cast<IGraphic2Module *>(module));
+            return found;
+        }
+
+        /**
+         * @brief Les bibliotheques chargees, une par colonne de la table.
+         *
+         * Ce sont elles qu'on charge et decharge : un module ne se retire
+         * pas seul, il part avec la sienne.
+         */
+        std::vector<Entry> GetLibraries() {
+            std::vector<Entry> found;
+
+            for (const std::string &key : _modules.GetKeys())
+                found.push_back({key, key, "dll"});
             return found;
         }
 
@@ -273,13 +292,7 @@ class ArcadeCore : public IApp {
          * de modules qui n'existait pas hier apparait sans recompiler.
          */
         std::vector<std::string> columns() {
-            std::vector<std::string> found{GRAPHIC2, IAppModule::contract};
-
-            for (const std::string &type : _modules.GetTypes())
-                if (type != GRAPHIC2 && type != GRAPHIC3 &&
-                    type != IAppModule::contract)
-                    found.push_back(type);
-            return found;
+            return {LIBS, GRAPHIC2, IAppModule::contract, OTHERS};
         }
 
         /** @brief Le contrat de la colonne courante. */
@@ -290,12 +303,14 @@ class ArcadeCore : public IApp {
         }
 
         /** @brief Ce que la colonne courante propose. */
-        std::vector<Entry> entries() {
-            const std::string type = column();
+        std::vector<Entry> entries() { return entriesOf(column()); }
 
-            if (type == GRAPHIC2)
-                return GetGraphics();
-            return of(type);
+        /** @brief Ce que cette colonne propose, pseudo-colonnes comprises. */
+        std::vector<Entry> entriesOf(const std::string &name) {
+            if (name == LIBS)     return GetLibraries();
+            if (name == GRAPHIC2) return GetGraphics();
+            if (name == OTHERS)   return GetOthers();
+            return of(name);
         }
 
         /** @brief Le curseur de la colonne courante, cree au besoin. */
@@ -337,6 +352,29 @@ class ArcadeCore : public IApp {
                 "quit\n"
                 "\nmemes verbes sur un contrat : " + contracts +
                 "\n  ex. list audio | set audio raylib | unset audio");
+        }
+
+        /**
+         * @brief Les bibliotheques chargees, et ce que chacune apporte.
+         *
+         * C'est la vue par DLL : une ligne par bibliotheque, puis ses
+         * modules avec leur contrat.
+         */
+        void showLibraries() {
+            const std::vector<Entry> libs = GetLibraries();
+
+            if (libs.empty())
+                return say("(aucune)");
+            for (const Entry &lib : libs) {
+                std::printf("  %c %s\n",
+                            (_using && keyOf(_using) == lib.key) ? '*' : ' ',
+                            lib.key.c_str());
+                for (IModule *module : _modules.GetAllByKey(lib.key))
+                    if (module)
+                        std::printf("      %-12s (%s)\n",
+                                    module->name(), module->type());
+            }
+            std::fflush(stdout);
         }
 
         /** @brief Une colonne du menu, avec ce qui est en service marque. */
@@ -492,10 +530,21 @@ class ArcadeCore : public IApp {
             /* Un contrat que la borne ne comprend pas : elle l'arbitre quand
              * meme. Declarer qui est en service ne demande qu'une chaine, et
              * c'est tout ce dont un invite a besoin pour le trouver. */
-            IModule *picked = _modules.Get(type, list[cursor()].key);
+            /* Une bibliotheque ne se met pas "en service" : elle se charge
+             * ou se decharge. Retour arriere s'en occupe. */
+            if (type == LIBS) {
+                _status = list[cursor()].key + " : retour pour la decharger";
+                return;
+            }
 
-            select(type, current(type) == picked ? nullptr : picked);
-            _status = type + " : " + (current(type) ? list[cursor()].name : "aucun");
+            /* Colonne fusionnee : on arbitre le contrat de l'ENTREE. */
+            const std::string contract =
+                (type == OTHERS) ? list[cursor()].type : type;
+            IModule *picked = _modules.Get(contract, list[cursor()].key);
+
+            select(contract, current(contract) == picked ? nullptr : picked);
+            _status = contract + " : " +
+                      (current(contract) ? list[cursor()].name : "aucun");
         }
 
         /**
@@ -746,6 +795,9 @@ class ArcadeCore : public IApp {
 
             if (verb == "list" && what == "graphics") return show(GetGraphics());
             if (verb == "list" && what == "games")    return show(GetGames());
+            if (verb == "list" && (what == "libs" || what == "libraries"))
+                return showLibraries();
+            if (verb == "list" && what == "others")   return show(GetOthers());
 
             if (verb == "get" && what == "graphic")
                 return say(_using ? _using->name() : "(aucune)");
@@ -806,8 +858,7 @@ class ArcadeCore : public IApp {
 
             for (size_t c = 0; c < all.size(); c++) {
                 const bool here = (c == _column);
-                const std::vector<Entry> list = (all[c] == GRAPHIC2)
-                    ? GetGraphics() : of(all[c]);
+                const std::vector<Entry> list = entriesOf(all[c]);
                 std::string text = (here ? "> " : "  ") + heading(all[c]) + "\n\n";
 
                 if (list.empty())
@@ -848,9 +899,24 @@ class ArcadeCore : public IApp {
             if (type == IAppModule::contract)
                 return _running && _running->name() == entry.name;
 
-            IModule *inService = current(type);
+            /* Une bibliotheque est marquee quand c'est d'elle que vient la
+             * fenetre : c'est le seul lien que la borne ait avec une dll. */
+            if (type == LIBS)
+                return _using && keyOf(_using) == entry.key;
+
+            /* Colonne fusionnee : chaque entree repond de SON contrat, pas
+             * de celui de la colonne, qui n'en est pas un. */
+            IModule *inService = current(type == OTHERS ? entry.type : type);
 
             return inService && inService->name() == entry.name;
+        }
+
+        /** @brief La bibliotheque d'ou vient ce module, "" si introuvable. */
+        std::string keyOf(IModule *module) {
+            for (const std::string &key : _modules.GetKeys())
+                if (_modules.Get(module->type(), key) == module)
+                    return key;
+            return "";
         }
 
         /**
