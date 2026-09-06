@@ -18,7 +18,6 @@ include(${cmakeutils_SOURCE_DIR}/ToolVar.cmake)
 find_package(System REQUIRED)
 find_package(icore REQUIRED)
 find_package(imodule REQUIRED)
-find_package(modulemanager REQUIRED)
 find_package(igraphic REQUIRED)
 
 add_executable(${PROJECT_NAME} sources/main.cpp)
@@ -28,7 +27,7 @@ add_executable(${PROJECT_NAME} sources/main.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE
   icore
   igraphic
-  modulemanager
+  imodule
   ${CMAKE_DL_LIBS}
 )
 
@@ -64,7 +63,7 @@ if (TEST_SOURCES)
     gtest_main
     icore
     igraphic
-    modulemanager
+    imodule
     ${CMAKE_DL_LIBS}
   )
 
