@@ -178,8 +178,8 @@ class ArcadeCore : public IApp {
             /* Plus de stop(84) ici : sans fenetre la borne ATTEND, elle ne
              * meurt pas. Le terminal permet d'en redemander une. */
             if (!_window || !_keyboard) {
-                if (_app)
-                    _app->event();
+                for (const Running &game : _running)
+                    game.app->event();
                 return;
             }
 
@@ -209,8 +209,8 @@ class ArcadeCore : public IApp {
              *
              * Il recoit l'etape event(), jamais run() - qui ne rendrait pas
              * la main. C'est pour ca qu'ITickable est public. */
-            if (_app)
-                _app->event();
+            for (const Running &game : _running)
+                game.app->event();
         }
 
         void update() override {
@@ -225,10 +225,11 @@ class ArcadeCore : public IApp {
             /* Meme raison pour le jeu : c'est l'arcade qui le tient, donc
              * c'est a elle de lacher quand il est condamne. Un jeu ne se
              * remplace pas - on s'arrete la et le menu revient. */
-            if (_running && _running->mustClose()) {
-                _status = std::string(_running->name()) + " decharge";
-                quit();
-            }
+            for (size_t i = _running.size(); i-- > 0; )
+                if (_running[i].module->mustClose()) {
+                    _status = std::string(_running[i].module->name()) + " decharge";
+                    quit(_running[i].module);
+                }
 
             /* A chaque tick, sans exception. Ce qui est condamne et libre se
              * ferme ; le reste repasse au tour suivant. */
@@ -244,14 +245,15 @@ class ArcadeCore : public IApp {
 
 
 
-            if (_app)
-                _app->update();
+            for (const Running &game : _running)
+                game.app->update();
 
             /* Un jeu qui s'arrete lui-meme rend la main a la borne, il ne la
              * ferme pas. running() est vrai des la construction, donc ce test
              * ne se declenche que sur un stop() volontaire. */
-            if (_app && !_app->running())
-                quit();
+            for (size_t i = _running.size(); i-- > 0; )
+                if (!_running[i].app->running())
+                    quit(_running[i].module);
         }
 
         void display() override {
@@ -272,8 +274,8 @@ class ArcadeCore : public IApp {
             /* Le jeu dessine ICI, entre le begin et le end de la borne. Il
              * n'ouvre pas la frame : elle appartient a qui possede la
              * fenetre, et ce n'est pas lui. */
-            if (_app)
-                _app->display();
+            for (const Running &game : _running)
+                game.app->display();
             _window->endDraw();
         }
 
@@ -525,8 +527,8 @@ class ArcadeCore : public IApp {
 
                 if (cursor() >= games.size())
                     return;
-                if (_running == games[cursor()])
-                    return quit();   // deja lance : entree l'arrete
+                if (running(games[cursor()]))
+                    return quit(games[cursor()]);   // deja lance : entree l'arrete
                 return play(games[cursor()]);
             }
 
@@ -558,36 +560,55 @@ class ArcadeCore : public IApp {
          * une bascule de vendor sans que la borne ait a le prevenir.
          */
         void play(IAppModule *module) {
-            quit();
-
-            /* DETENTEUR avant tout : _app est alloue par cette dll et sa
-             * vtable y vit. Sans ce compteur, Reconcile() fermerait la
-             * bibliotheque sous une application vivante. C'est la meme regle
-             * que pour les vendors, elle avait simplement ete oubliee ici -
-             * personne ne s'en apercevait tant qu'on ne pouvait pas
-             * decharger un jeu. */
-            module->acquire();
-            _running = module;
-            _app = module->createApp(_modules);
-
-            if (!_app) {
-                _status = std::string(module->name()) + " : createApp a echoue";
-                quit();
-            }
-        }
-
-        /** @brief Arrete le jeu en cours. La dll qui a alloue libere. */
-        void quit() {
-            if (!_running)
+            if (running(module))
                 return;
 
-            /* L'ordre, comme partout : detruire pendant que la dll vit, et
-             * relacher seulement apres. Entre les deux elle pourrait fermer. */
-            if (_app)
-                _running->deleteApp(_app);
-            _running->release();
-            _app = nullptr;
-            _running = nullptr;
+            /* DETENTEUR avant tout : l'application est allouee par cette dll
+             * et sa vtable y vit. Sans ce compteur, Reconcile() fermerait la
+             * bibliotheque sous une application vivante. */
+            module->acquire();
+
+            IApp *app = module->createApp(_modules);
+
+            if (!app) {
+                module->release();
+                _status = std::string(module->name()) + " : createApp a echoue";
+                return;
+            }
+            _running.push_back({module, app});
+        }
+
+        /** @brief Ce jeu tourne-t-il deja ? */
+        bool running(IAppModule *module) const {
+            for (const Running &game : _running)
+                if (game.module == module)
+                    return true;
+            return false;
+        }
+
+        /** @brief Arrete tous les jeux. */
+        void quit() {
+            while (!_running.empty())
+                quit(_running.back().module);
+        }
+
+        /**
+         * @brief Arrete CE jeu. La dll qui a alloue libere.
+         *
+         * @param module
+         */
+        void quit(IAppModule *module) {
+            for (size_t i = 0; i < _running.size(); i++) {
+                if (_running[i].module != module)
+                    continue;
+
+                /* L'ordre, comme partout : detruire pendant que la dll vit,
+                 * et relacher seulement apres. */
+                module->deleteApp(_running[i].app);
+                module->release();
+                _running.erase(_running.begin() + i);
+                return;
+            }
         }
 
         /**
@@ -692,8 +713,10 @@ class ArcadeCore : public IApp {
              *    une fois que l'hote aura sa fenetre. */
             select(GRAPHIC2, nullptr);
 
-            if (_app)
-                _app->update();
+            /* Etape 2 : chaque invite lache, pendant que l'ancien vendor
+             * vit encore. */
+            for (const Running &game : _running)
+                game.app->update();
 
             release();
 
@@ -707,8 +730,8 @@ class ArcadeCore : public IApp {
              * sans fenetre il ne peut plus meme recevoir echap, alors que le
              * jeu, lui, sait continuer sans rien voir. On l'arrete, et on
              * redemande. */
-            if (!_window && _app) {
-                _status = std::string(_running->name()) + " arrete : " +
+            if (!_window && !_running.empty()) {
+                _status = std::string(_running.front().module->name()) + " arrete : " +
                           module->name() + " ne donne qu'une fenetre";
                 quit();
                 _window = module->createWindow(WIDTH, HEIGHT, "P-E-R-R-Y arcade");
@@ -805,7 +828,16 @@ class ArcadeCore : public IApp {
             if (verb == "get" && what == "graphic")
                 return say(_using ? _using->name() : "(aucune)");
             if (verb == "get" && what == "game")
-                return say(_running ? _running->name() : "(aucun)");
+            {
+                if (_running.empty())
+                    return say("(aucun)");
+
+                std::string names;
+
+                for (const Running &game : _running)
+                    names += (names.empty() ? "" : ", ") + std::string(game.module->name());
+                return say(names);
+            }
 
             if (verb == "set" && what == "graphic")   return setGraphic(name);
             if (verb == "set" && what == "game")      return setGame(name);
@@ -1057,8 +1089,17 @@ class ArcadeCore : public IApp {
         /* Le module EN COURS D'USAGE, distinct du curseur du menu. Deux
          * notions, deux variables : _graphic dit ce qui est surligne,
          * _using dit qui a fabrique la fenetre. */
-        IAppModule *_running = nullptr;   ///< le module du jeu lance
-        IApp *_app = nullptr;             ///< le jeu lui-meme
+        /** @brief Un jeu en cours : sa fabrique, et ce qu'elle a construit. */
+        struct Running {
+            IAppModule *module;   ///< la fabrique, tenue tant qu'il tourne
+            IApp *app;            ///< le jeu, detruit par cette meme fabrique
+        };
+
+        /* PLUSIEURS, et c'est tout l'interet d'ITickable public : la borne
+         * les fait avancer un par un dans sa propre boucle, chacun avec sa
+         * fenetre. Ce qui les limite n'est pas la borne mais le materiel -
+         * deux jeux ne peuvent pas tenir le meme vendor OpenGL. */
+        std::vector<Running> _running;
 
         IGraphic2Module *_using = nullptr;
 
