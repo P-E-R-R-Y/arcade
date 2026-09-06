@@ -4,12 +4,10 @@
  *
  * Elle ne connait aucun vendor et aucun jeu. Elle ne connait meme pas les
  * contrats qu'ils remplissent : un IModuleManager charge tout ce qui exporte
- * getModules() et trie par IModule::type().
- *
- * C'est la difference avec ModuleManager<Ts...>, plus agreable a utiliser
- * mais qui ne charge que ce qu'on a su nommer a la compilation. Une borne
- * doit pouvoir lister une physique ou un reseau qu'elle ne sait pas
- * utiliser, pour qu'un jeu qui connait ce contrat puisse le reclamer.
+ * getModules() et trie par IModule::type() - une table decouverte au
+ * chargement, pas des colonnes nommees a la compilation. Une borne doit
+ * pouvoir lister une physique ou un reseau qu'elle ne sait pas utiliser,
+ * pour qu'un jeu qui connait ce contrat puisse le reclamer.
  */
 
 #ifndef ARCADECORE_HPP_
@@ -26,6 +24,7 @@
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <cstdio>
 #include <sstream>
 #include <string>
@@ -97,7 +96,8 @@ class ArcadeCore : public IApp {
 
             for (const char *type : {GRAPHIC2, GRAPHIC3})
                 for (IModule *module : _modules.GetAllByType(type))
-                    found.push_back(static_cast<IGraphic2Module *>(module));
+                    if (module)   // un Span rend les trous a nullptr
+                        found.push_back(static_cast<IGraphic2Module *>(module));
             return found;
         }
 
@@ -106,7 +106,8 @@ class ArcadeCore : public IApp {
             std::vector<IAppModule *> found;
 
             for (IModule *module : _modules.GetAllByType(GAME))
-                found.push_back(static_cast<IAppModule *>(module));
+                if (module)   // un Span rend les trous a nullptr
+                    found.push_back(static_cast<IAppModule *>(module));
             return found;
         }
 
@@ -142,8 +143,8 @@ class ArcadeCore : public IApp {
         /** @brief Les familles presentes, quelles qu'elles soient. */
         std::vector<std::string> GetTypes() { return _modules.GetTypes(); }
 
-        /** @brief Le registre, pour qui saura en faire quelque chose. */
-        IModuleRegistry &GetRegistry() { return _modules; }
+        /** @brief Le manager, pour qui saura en faire quelque chose. */
+        IModuleManager &GetRegistry() { return _modules; }
 
     protected:
         void event() override {
@@ -212,7 +213,8 @@ class ArcadeCore : public IApp {
 
             /* A chaque tick, sans exception. Ce qui est condamne et libre se
              * ferme ; le reste repasse au tour suivant. */
-            _modules.Reconcile();
+            if (_modules.Reconcile())
+                forget();   // une colonne fermee peut etre dans _current
 
             /* Une colonne fermee raccourcit les listes sous le curseur. Sans
              * ce recadrage il designerait le vide, et plus rien ne serait
@@ -339,7 +341,7 @@ class ArcadeCore : public IApp {
 
         /** @brief Une colonne du menu, avec ce qui est en service marque. */
         void show(const std::vector<Entry> &entries, const std::string &type = "") {
-            IModule *current = type.empty() ? nullptr : _modules.Current(type);
+            IModule *inService = type.empty() ? nullptr : current(type);
 
             if (entries.empty())
                 return say("(aucun)");
@@ -351,7 +353,7 @@ class ArcadeCore : public IApp {
                 const bool live = type.empty()
                     ? ((_using && entry.name == _using->name())
                        || (_running && entry.name == _running->name()))
-                    : (current && entry.name == current->name());
+                    : (inService && entry.name == inService->name());
 
                 std::printf("  %c %-10s [%s]\n", live ? '*' : ' ',
                             entry.name.c_str(), entry.key.c_str());
@@ -416,7 +418,7 @@ class ArcadeCore : public IApp {
         void setModule(const std::string &type, const std::string &name) {
             for (const Entry &entry : of(type))
                 if (entry.name == name || entry.key == name) {
-                    _modules.Select(type, _modules.Get(type, entry.key));
+                    select(type, _modules.Get(type, entry.key));
                     return say(type + " en service : " + entry.name);
                 }
             say("aucun " + type + " sous ce nom : " + name);
@@ -492,8 +494,8 @@ class ArcadeCore : public IApp {
              * c'est tout ce dont un invite a besoin pour le trouver. */
             IModule *picked = _modules.Get(type, list[cursor()].key);
 
-            _modules.Select(type, _modules.Current(type) == picked ? nullptr : picked);
-            _status = type + " : " + (_modules.Current(type) ? list[cursor()].name : "aucun");
+            select(type, current(type) == picked ? nullptr : picked);
+            _status = type + " : " + (current(type) ? list[cursor()].name : "aucun");
         }
 
         /**
@@ -636,14 +638,14 @@ class ArcadeCore : public IApp {
              * 4. SEULEMENT MAINTENANT on declare le nouveau et on l'allume.
              *    Les invites se rebrancheront d'eux-memes au tick suivant,
              *    une fois que l'hote aura sa fenetre. */
-            _modules.Select(GRAPHIC2, nullptr);
+            select(GRAPHIC2, nullptr);
 
             if (_app)
                 _app->update();
 
             release();
 
-            _modules.Select(GRAPHIC2, module);
+            select(GRAPHIC2, module);
             module->acquire();
             _using = module;
             _window = module->createWindow(WIDTH, HEIGHT, "P-E-R-R-Y arcade");
@@ -763,13 +765,13 @@ class ArcadeCore : public IApp {
             if (known(what)) {
                 if (verb == "list") return show(of(what), what);
                 if (verb == "get") {
-                    IModule *current = _modules.Current(what);
+                    IModule *inService = current(what);
 
-                    return say(current ? current->name() : "(aucun)");
+                    return say(inService ? inService->name() : "(aucun)");
                 }
                 if (verb == "set")   return setModule(what, name);
                 if (verb == "unset") {
-                    _modules.Select(what, nullptr);
+                    select(what, nullptr);
                     return say("aucun " + what + " en service");
                 }
             }
@@ -846,9 +848,9 @@ class ArcadeCore : public IApp {
             if (type == IAppModule::contract)
                 return _running && _running->name() == entry.name;
 
-            IModule *current = _modules.Current(type);
+            IModule *inService = current(type);
 
-            return current && current->name() == entry.name;
+            return inService && inService->name() == entry.name;
         }
 
         /**
@@ -912,6 +914,43 @@ class ArcadeCore : public IApp {
         static constexpr int32_t HEIGHT = 560;
 
         Console _console;
+        /* ---- ce que LA BORNE affiche comme en service ------------------ *
+         *
+         * Son propre etat de menu, plus celui de la table : un jeu ne suit
+         * plus ce choix, il lit GetAllByType() et prend ce qu'il veut. Ce
+         * qui est ici ne concerne donc que l'affichage de la borne et la
+         * fenetre qu'elle ouvre pour elle-meme. */
+
+        /** @brief Le module que la borne affiche en service, ou nullptr. */
+        IModule *current(const std::string &type) const {
+            const auto found = _current.find(type);
+
+            return found == _current.end() ? nullptr : found->second;
+        }
+
+        /** @brief Declare celui en service. nullptr pour n'en avoir aucun. */
+        void select(const std::string &type, IModule *module) {
+            if (module)
+                _current[type] = module;
+            else
+                _current.erase(type);
+        }
+
+        /** @brief Oublie ce qui a ete ferme : la table ne le connait plus. */
+        void forget() {
+            for (auto it = _current.begin(); it != _current.end(); ) {
+                const std::vector<std::string> &keys = _modules.GetKeys();
+                bool alive = false;
+
+                for (const std::string &key : keys)
+                    if (_modules.Get(it->first, key) == it->second)
+                        alive = true;
+                it = alive ? std::next(it) : _current.erase(it);
+            }
+        }
+
+        std::map<std::string, IModule *> _current;
+
         IModuleManager _modules;
         std::string _libraries;
         std::string _assets;
